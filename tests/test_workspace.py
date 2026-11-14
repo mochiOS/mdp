@@ -11,7 +11,7 @@ from unittest.mock import patch
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
 from mdp import workspace
-from mdp.cli import Error, lock_project, pack, verify, assemble, composition_lock
+from mdp.cli import Error, lock_project, pack, verify, assemble, composition_lock, sync, build
 from mdp.pipeline import expand
 
 
@@ -112,6 +112,20 @@ mode=420
             self.assertNotEqual(before['resolution'],after['resolution'])
             self.assertEqual(before['resolution_graph'],after['resolution_graph'])
             self.assertIn('unused',lock.read_text())
+
+    def test_standalone_sdk_lock_sync_and_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);project=root/'mdp.toml';context=root/'sdk.json'
+            command=[sys.executable,'-c',"import os; from pathlib import Path; Path('result').write_text(os.environ['SDK_CHOICE'])"]
+            project.write_text('format=1\n[build]\nsdk_context=true\ncommand='+json.dumps(command)+'\n')
+            context.write_text(json.dumps({'format':1,'sdk':{'id':'a'*64,'target':'test','abi':'test'},'artifacts':[], 'sources':[], 'environment':{'SDK_CHOICE':'explicit'}}))
+            with self.assertRaisesRegex(Error,'explicit SDK'):lock_project(project)
+            lock_project(project,context)
+            sync(project)
+            with self.assertRaisesRegex(Error,'build --context'):build(project)
+            build(project,context)
+            self.assertEqual((root/'result').read_text(),'explicit')
+            self.assertEqual(json.loads((root/'mdp.lock').read_text())['sdk']['id'],'a'*64)
 
     def test_dependency_order_and_cycle(self):
         projects={'a':{'config':{'build':{'requires':['b']}}},'b':{'config':{'build':{}}}}

@@ -129,6 +129,7 @@ def sdk_context(path):
 def lock_project(project, context=None):
     """Record reviewed dependency identities; never resolve a moving latest version."""
     root, cfg = config(project)
+    require(not cfg.get('build', {}).get('sdk_context') or context is not None, 'this producer requires an explicit SDK: mdp lock --context <SDK-context.json>')
     deps = dependencies(cfg)
     for item in deps:
         if 'path' in item:
@@ -151,6 +152,10 @@ def locked(project, context=None):
     expected = {'format': 1, 'dependencies': dependencies(cfg)}
     if context:
         expected['sdk'] = sdk_context(context)['sdk']
+    elif 'sdk' in value:
+        sdk = value['sdk']
+        require(isinstance(sdk, dict) and isinstance(sdk.get('id'), str) and SHA.fullmatch(sdk['id']), 'invalid locked SDK identity')
+        expected['sdk'] = sdk
     require(value == expected,
             'mdp.lock is stale; review dependencies and run mdp lock')
     return root, cfg, value
@@ -195,6 +200,7 @@ def sync(project):
 def build(project, context=None):
     """Run only the selected project's explicit argv, with locked dependency paths."""
     root, cfg, lock = locked(project, context)
+    require(not cfg.get('build', {}).get('sdk_context') or context is not None, 'this producer requires mdp build --context <SDK-context.json>')
     command = cfg.get('build', {}).get('command')
     require(isinstance(command, list) and command and all(isinstance(x, str) for x in command),
             '[build].command must be a nonempty argv array')
