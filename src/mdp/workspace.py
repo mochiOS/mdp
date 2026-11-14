@@ -39,7 +39,7 @@ def source_state(path):
     """Describe actual Git input, including local edits, without including build caches."""
     head = subprocess.check_output(['git', '-C', str(path), 'rev-parse', 'HEAD'], text=True).strip()
     changes = subprocess.check_output(['git', '-C', str(path), 'diff', 'HEAD', '--binary', '--', '.',
-                                       ':!Cargo.lock', ':!mdp.lock'])
+                                       ':!Cargo.lock', ':!mdp.lock', ':(exclude,glob)**/Cargo.lock', ':(exclude,glob)**/mdp.lock'])
     hasher = hashlib.sha256(changes)
     untracked = subprocess.check_output(['git', '-C', str(path), 'ls-files', '--others', '--exclude-standard', '-z'])
     for raw in sorted(untracked.split(b'\0')):
@@ -52,11 +52,18 @@ def source_state(path):
         if source.is_file() and not source.is_symlink():
             hasher.update(raw + b'\0' + bytes.fromhex(digest(source)))
     locks, graphs = {}, {}
-    for name in ('Cargo.lock', 'mdp.lock'):
+    listed = subprocess.check_output(['git', '-C', str(path), 'ls-files', '--cached', '--others', '--exclude-standard', '-z'])
+    names = {os.fsdecode(raw) for raw in listed.split(b'\0') if raw and Path(os.fsdecode(raw)).name in ('Cargo.lock', 'mdp.lock')}
+    names.update(name for name in ('Cargo.lock', 'mdp.lock') if (path / name).is_file())
+    for name in sorted(names):
+        if name.startswith(('out/', 'target/', '.mdp/')):continue
         if (path / name).is_file():
             locks[name] = digest(path / name)
-            if name == 'Cargo.lock':
-                graph = tomllib.loads((path / name).read_text())
+            if Path(name).name == 'Cargo.lock':
+                try:graph = tomllib.loads((path / name).read_text())
+                except tomllib.TOMLDecodeError:
+                    graphs[name] = locks[name]
+                    continue
                 if 'patch' in graph:
                     graph['patch'].pop('unused', None)
                     if not graph['patch']:del graph['patch']

@@ -127,6 +127,21 @@ mode=420
             self.assertEqual((root/'result').read_text(),'explicit')
             self.assertEqual(json.loads((root/'mdp.lock').read_text())['sdk']['id'],'a'*64)
 
+    def test_nested_cargo_lock_changes_are_recorded_as_resolution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);member=root/'driver';member.mkdir()
+            subprocess.run(['git','init','-q',str(root)],check=True)
+            lock=member/'Cargo.lock';lock.write_text('version=4\n[[package]]\nname="example"\nversion="1"\n')
+            subprocess.run(['git','-C',str(root),'add','.'],check=True)
+            subprocess.run(['git','-C',str(root),'-c','commit.gpgsign=false','-c','user.name=Test','-c','user.email=test@example.invalid','commit','-qm','source'],check=True)
+            before=workspace.source_state(root)
+            lock.write_text(lock.read_text().replace('version="1"','version="2"'))
+            after=workspace.source_state(root)
+            self.assertEqual(before['working_tree'],after['working_tree'])
+            self.assertNotEqual(before['resolution_graph'],after['resolution_graph'])
+            self.assertIn('driver/Cargo.lock',after['resolution'])
+            self.assertIn('version="2"',lock.read_text())
+
     def test_dependency_order_and_cycle(self):
         projects={'a':{'config':{'build':{'requires':['b']}}},'b':{'config':{'build':{}}}}
         self.assertEqual(workspace.order(projects),['b','a'])
