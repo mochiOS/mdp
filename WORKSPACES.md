@@ -28,6 +28,11 @@ concurrent builds, propagates real command failures, and verifies each exported
 archive. Cache receipts require matching source, SDK/configuration, dependency
 and archive identities. An unchanged artifact can be reused; missing or corrupt
 archives are rebuilt. No successful receipt is fabricated for a failed command.
+Consumer keys use the exchanged artifact identity and measured generated files,
+not the producer's Git diagnostics. Rebuilding an identical artifact therefore
+does not rebuild its consumers. Declared `outputs` are files measured by content,
+mode and symlink target; modifying a cached SDK setting forces its producer to
+regenerate it before reuse.
 
 `mdp.workspace.lock` records exact Git revisions, local source edits and declared
 configuration/SDK input hashes. `[[external_inputs]]` pins an explicitly imported

@@ -112,7 +112,29 @@ def build_key(name, cfg, states, inputs, dependencies, root):
             sources[key]['resolution'] = state.get('resolution_graph', state['resolution'])
     files = file_inputs(root, cfg)
     return hashlib.sha256(encoded({'sources': sources, 'inputs': inputs, 'files': files,
-                                  'dependencies': dependencies, 'command': cfg['command']})).hexdigest()
+                                  'dependencies': {key: dependency_identity(value) for key,value in dependencies.items()},
+                                  'command': cfg['command']})).hexdigest()
+
+
+def dependency_identity(receipt):
+    """Depend on exchanged products, keeping producer source diagnostics out of consumer keys."""
+    if receipt is None:return None
+    if 'artifact' in receipt:
+        return {key:receipt[key] for key in ('artifact','sha256','package')} | {'outputs':receipt.get('output_hashes',{})}
+    if receipt.get('output_hashes'):
+        return {'outputs':receipt['output_hashes']}
+    return {'input_sha256':receipt['input_sha256']}
+
+
+def output_state(root, cfg):
+    """Measure declared generated files; missing or invalid outputs cannot be cached."""
+    result={}
+    for value in cfg.get('outputs',[]):
+        path=root/relative(value)
+        if not path.is_file():return None
+        result[value]={'sha256':digest(path),'mode':path.stat().st_mode & 0o777,
+                       'link':os.readlink(path) if path.is_symlink() else None}
+    return result
 
 
 def file_inputs(root, cfg):
@@ -256,7 +278,8 @@ def build_locked(path, selected=None, jobs=4, dry_run=False):
         receipt = receipts.get(name, {})
         artifact = project['source'] / relative(cfg['artifact']) if cfg.get('artifact') else None
         outputs = [root / relative(value) for value in cfg.get('outputs', [])]
-        if receipt.get('input_sha256') == key and all(p.exists() for p in outputs) and (
+        measured_outputs=output_state(root,cfg)
+        if receipt.get('input_sha256') == key and measured_outputs is not None and measured_outputs == receipt.get('output_hashes',{}) and (
                 artifact is None or artifact.is_file() and digest(artifact) == receipt.get('sha256')):
             print(f'[mdp cached] {name}', flush=True)
             continue
@@ -272,7 +295,9 @@ def build_locked(path, selected=None, jobs=4, dry_run=False):
         require(all(after[k] == states[name][k] for k in ('content_sha256',)),
                 f'{name}: source changed during its build; output is not accepted')
         states[name] = after
-        state = {'input_sha256': input_key(), 'source': after, 'outputs': cfg.get('outputs', [])}
+        measured_outputs=output_state(root,cfg)
+        require(measured_outputs is not None, f'{name}: declared output is missing or is not a file')
+        state = {'input_sha256': input_key(), 'source': after, 'outputs': cfg.get('outputs', []), 'output_hashes':measured_outputs}
         if artifact is not None:
             manifest = verify(artifact)
             state.update(artifact=artifact.relative_to(root).as_posix(), sha256=digest(artifact), package=manifest['package'])
@@ -303,7 +328,8 @@ def build_locked(path, selected=None, jobs=4, dry_run=False):
             artifact = root / receipt['artifact'] if 'artifact' in receipt else None
             if artifact is not None and (not artifact.is_file() or digest(artifact) != receipt.get('sha256')):
                 continue
-            if not all((root / relative(value)).exists() for value in cfg.get('outputs', [])):
+            measured_outputs=output_state(root,cfg)
+            if measured_outputs is None or measured_outputs != receipt.get('output_hashes',{}):
                 continue
             valid[name] = receipt
         artifacts = [r for r in valid.values() if 'artifact' in r]

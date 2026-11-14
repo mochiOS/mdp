@@ -44,6 +44,44 @@ class WorkspaceTests(unittest.TestCase):
             workspace.build(cfg)
             self.assertEqual((root/'app/out/counter').read_bytes(),b'xx')
             self.assertEqual((root/'library/out/counter').read_bytes(),b'x')
+            old_digest=__import__('hashlib').sha256((root/'library/out/library.tar.mdp').read_bytes()).hexdigest()
+            (root/'library/source').write_text('source-only maintenance; same exported product')
+            workspace.lock(cfg);workspace.build(cfg)
+            self.assertEqual(__import__('hashlib').sha256((root/'library/out/library.tar.mdp').read_bytes()).hexdigest(),old_digest)
+            self.assertEqual((root/'library/out/counter').read_bytes(),b'xx')
+            self.assertEqual((root/'app/out/counter').read_bytes(),b'xx')
+
+    def test_generated_sdk_files_are_measured_and_repaired_before_consumer_reuse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            for name in ('context','app'):
+                project=root/name;project.mkdir()
+                subprocess.run(['git','init','-q',str(project)],check=True)
+                if name=='context':
+                    (project/'source').write_text('one')
+                    recipe={'format':1,'steps':['mkdir -p out; cat source > out/value; printf x >> out/counter']}
+                    build='command=["mdp","pipeline"]\noutputs=["context/out/value"]\n'
+                else:
+                    recipe={'format':1,'steps':['mkdir -p out; cat ../context/out/value > out/result; printf x >> out/counter'],
+                            'package':dict(name=name,version='1',target='test',abi='test'),
+                            'artifact':'out/app.tar.mdp','exports':[dict(source='out/result',area='files',destination=name)]}
+                    build='command=["mdp","pipeline"]\nrequires=["context"]\nartifact="out/app.tar.mdp"\n'
+                (project/'mdp.recipe.json').write_text(json.dumps(recipe))
+                (project/'mdp.toml').write_text('format=1\n[build]\n'+build)
+                subprocess.run(['git','-C',str(project),'add','.'],check=True)
+                subprocess.run(['git','-C',str(project),'-c','commit.gpgsign=false','-c','user.name=Test','-c','user.email=test@example.invalid','commit','-qm','source'],check=True)
+            cfg=root/'mdp.workspace.toml'
+            cfg.write_text('format=1\ntarget="test"\nabi="test"\n[[projects]]\nname="context"\npath="context"\n[[projects]]\nname="app"\npath="app"\n')
+            workspace.lock(cfg);workspace.build(cfg)
+            (root/'context/out/value').write_text('tampered')
+            workspace.build(cfg)
+            self.assertEqual((root/'context/out/value').read_text(),'one')
+            self.assertEqual((root/'context/out/counter').read_text(),'xx')
+            self.assertEqual((root/'app/out/counter').read_text(),'x')
+            (root/'context/source').write_text('two')
+            workspace.lock(cfg);workspace.build(cfg)
+            self.assertEqual((root/'app/out/result').read_text(),'two')
+            self.assertEqual((root/'app/out/counter').read_text(),'xx')
 
     def test_source_change_during_build_never_publishes_composition(self):
         with tempfile.TemporaryDirectory() as tmp:
