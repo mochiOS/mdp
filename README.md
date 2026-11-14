@@ -127,14 +127,14 @@ Areas are generic names; they do not grant permission to write to host paths.
 Archive creation is reproducible: fixed ownership/timestamps, stable JSON, and
 explicit file order. Modes are restricted to 0644 and 0755. Paths are canonical
 relative POSIX paths. Links, devices, sparse files, undeclared members, duplicates,
-and parent traversal are rejected. Version 1 does **not** support symlinks; producers
-must explicitly copy a library under each required SONAME for now. Hash locks
+and parent traversal are rejected. Format 1 does **not** support symlinks. Format 2 adds verified, same-area file
+aliases; see WORKSPACES.md. Absolute host paths are not interpreted as destinations. Hash locks
 provide integrity relative to trusted locks, not publisher authentication; review
 locks and transport them through a trusted source-control/release process.
 
-This first version supports one explicitly selected project per `build`. Workspace
-build scheduling, automatic dependency resolution, signatures, native SDK extraction,
-and image generation are intentionally not implemented.
+Workspace scheduling, pinned SDK contexts and trusted project-owned pipelines are
+implemented; see [WORKSPACES.md](WORKSPACES.md). Publisher signatures, automatic
+version selection and product-specific image generation are not implemented.
 
 ## Tests
 

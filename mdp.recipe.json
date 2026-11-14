@@ -1,0 +1,32 @@
+{
+  "format": 1,
+  "steps": [],
+  "package": {
+    "name": "mdp",
+    "version": "0.2.0",
+    "target": "x86_64-mochios",
+    "abi": "mochios-1"
+  },
+  "artifact": "out/mdp/mdp.tar.mdp",
+  "exports": [
+    {
+      "source": "mdp",
+      "area": "development-host",
+      "destination": "mdp/mdp"
+    },
+    {
+      "source": "pyproject.toml",
+      "area": "development-host",
+      "destination": "mdp/pyproject.toml"
+    },
+    {
+      "source": "src/mdp",
+      "area": "development-host",
+      "destination": "mdp/src/mdp",
+      "exclude": [
+        "__pycache__",
+        "*.pyc"
+      ]
+    }
+  ]
+}

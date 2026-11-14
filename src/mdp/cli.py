@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import posixpath
 from pathlib import Path, PurePosixPath
 import re
 import shutil
@@ -109,7 +110,23 @@ def dependencies(cfg):
     return values
 
 
-def lock_project(project):
+def sdk_context(path):
+    """Validate an explicitly selected local SDK context and its immutable inputs."""
+    value = read_json(path)
+    require(value.get('format') == 1 and isinstance(value.get('sdk'), dict), 'invalid SDK context')
+    require(isinstance(value['sdk'].get('id'), str) and SHA.fullmatch(value['sdk']['id']), 'invalid SDK context identity')
+    for item in value.get('artifacts', []):
+        require(digest(item['path']) == item['sha256'], 'SDK artifact changed; rebuild its context')
+    from .workspace import source_state
+    for source in value.get('sources', []):
+        state = source_state(Path(source['path']))
+        require(all(state[k] == source[k] for k in ('revision', 'working_tree')), 'SDK source changed; rebuild its context')
+    require(isinstance(value.get('environment'), dict) and all(isinstance(k, str) and isinstance(v, str)
+            for k, v in value['environment'].items()), 'SDK environment must contain strings')
+    return value
+
+
+def lock_project(project, context=None):
     """Record reviewed dependency identities; never resolve a moving latest version."""
     root, cfg = config(project)
     deps = dependencies(cfg)
@@ -119,17 +136,22 @@ def lock_project(project):
             require(source.is_relative_to(root) and source.is_file(), f"missing dependency: {item['name']}")
             require(digest(source) == item['sha256'], f"hash mismatch: {item['name']}")
     result = {'format': 1, 'dependencies': deps}
+    if context:
+        result['sdk'] = sdk_context(context)['sdk']
     atomic_json(root / 'mdp.lock', result)
     return result
 
 
-def locked(project):
+def locked(project, context=None):
     """Require a committed lock matching the project's exact dependency declarations."""
     root, cfg = config(project)
     path = root / 'mdp.lock'
     require(path.is_file(), 'mdp.lock is missing; review dependencies and run mdp lock')
     value = read_json(path)
-    require(value == {'format': 1, 'dependencies': dependencies(cfg)},
+    expected = {'format': 1, 'dependencies': dependencies(cfg)}
+    if context:
+        expected['sdk'] = sdk_context(context)['sdk']
+    require(value == expected,
             'mdp.lock is stale; review dependencies and run mdp lock')
     return root, cfg, value
 
@@ -170,13 +192,16 @@ def sync(project):
     return root, cfg, lock
 
 
-def build(project):
+def build(project, context=None):
     """Run only the selected project's explicit argv, with locked dependency paths."""
-    root, cfg, lock = locked(project)
+    root, cfg, lock = locked(project, context)
     command = cfg.get('build', {}).get('command')
     require(isinstance(command, list) and command and all(isinstance(x, str) for x in command),
             '[build].command must be a nonempty argv array')
     env = os.environ.copy()
+    if context:
+        env.update(sdk_context(context)['environment'])
+        env['MDP_SDK_DESCRIPTOR'] = str(Path(context).resolve())
     env['MDP_LOCK_FILE'] = str(root / 'mdp.lock')
     env_names = set()
     for dep in lock['dependencies']:
@@ -188,6 +213,8 @@ def build(project):
         env_names.add(key)
         env[key] = str(path)
     subprocess.run(command, cwd=root, env=env, check=True)
+    if context:
+        require(sdk_context(context)["sdk"] == lock["sdk"], "SDK changed during build")
 
 
 def check_paths(files):
@@ -202,6 +229,30 @@ def check_paths(files):
     for path in seen:
         for parent in PurePosixPath(path).parents:
             require(str(parent) not in seen, f'file/directory collision: {path}')
+
+
+def check_links(files):
+    """Validate local file aliases, excluding area escapes, missing targets and cycles."""
+    records = {f['area'] + '/' + f['destination']: f for f in files}
+    resolved = {}
+    for key, item in records.items():
+        if item.get('type') != 'symlink':
+            continue
+        target = item.get('target')
+        require(isinstance(target, str) and target and not target.startswith('/') and '\\' not in target
+                and '\x00' not in target, 'invalid symbolic link target')
+        destination = posixpath.normpath(posixpath.join(posixpath.dirname(item['destination']), target))
+        relative(destination)
+        selected = item['area'] + '/' + destination
+        require(selected in records, 'symbolic link must target a declared file in the same area')
+        resolved[key] = selected
+    for start in resolved:
+        seen = set()
+        current = start
+        while current in resolved:
+            require(current not in seen and len(seen) < 128, 'symbolic link cycle or excessive depth')
+            seen.add(current)
+            current = resolved[current]
 
 
 def pack(project, output):
@@ -226,7 +277,11 @@ def pack(project, output):
                         'destination': file['destination'], 'mode': mode,
                         'size': source.stat().st_size, 'sha256': digest(source)})
         sources.append(source)
-    manifest = {'format': 1, 'package': package, 'files': records,
+    for link in cfg.get('links', []):
+        records.append(dict(type='symlink', area=link['area'], destination=link['destination'], target=link['target']))
+    check_paths(records)
+    check_links(records)
+    manifest = {'format': 2 if cfg.get('links') else 1, 'package': package, 'files': records,
                 'dependencies': lock['dependencies'], 'lock_sha256': digest(root / 'mdp.lock')}
     raw = encoded(manifest)
     require(len(raw) <= MAX_MANIFEST, 'manifest is too large')
@@ -255,14 +310,14 @@ def pack(project, output):
     print(f'created {output}')
 
 
-def verify(path, staging=None):
+def verify(path, staging=None, areas=None):
     """Validate every archive member; optionally copy verified data into a fresh stage."""
     with tarfile.open(path, 'r:') as archive:
         first = archive.next()
         require(first is not None and first.name == 'manifest.json' and first.isfile()
                 and 0 < first.size <= MAX_MANIFEST, 'first member must be a bounded manifest.json')
         manifest = json.load(archive.extractfile(first))
-        require(manifest.get('format') == 1, 'unsupported MDP format')
+        require(manifest.get('format') in (1, 2), 'unsupported MDP format')
         package = manifest.get('package', {})
         identifier(package.get('name'))
         require(all(isinstance(package.get(k), str) and package[k] for k in ('version', 'target', 'abi')),
@@ -273,8 +328,13 @@ def verify(path, staging=None):
         files = manifest.get('files')
         require(isinstance(files, list) and 0 < len(files) <= MAX_FILES, 'invalid file count')
         check_paths(files)
+        check_links(files)
         expected = {}
         for item in files:
+            if item.get('type') == 'symlink':
+                require(manifest['format'] == 2, 'symlinks require format 2')
+                continue
+            require(item.get('type', 'file') == 'file', 'unknown MDP entry type')
             source = relative(item.get('source'))
             require(source.startswith('payload/') and source not in expected, 'invalid or duplicate source')
             require(type(item.get('size')) is int and item['size'] >= 0, 'invalid file size')
@@ -291,7 +351,7 @@ def verify(path, staging=None):
             hasher = hashlib.sha256()
             output = None
             try:
-                if staging is not None:
+                if staging is not None and (areas is None or record['area'] in areas):
                     destination = staging / record['area'] / record['destination']
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     output = destination.open('xb')
@@ -304,9 +364,15 @@ def verify(path, staging=None):
                 if output:
                     output.close()
             require(hasher.hexdigest() == record['sha256'], f'hash mismatch: {member.name}')
-            if staging is not None:
+            if output is not None:
                 os.chmod(destination, record['mode'])
         require(seen == set(expected), 'archive is missing declared files')
+        if staging is not None:
+            for item in files:
+                if item.get('type') == 'symlink' and (areas is None or item['area'] in areas):
+                    path = staging / item['area'] / item['destination']
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.symlink_to(item['target'])
     return manifest
 
 
@@ -329,7 +395,7 @@ def composition_lock(config_path):
     atomic_json(root / 'mdp.assembly.lock', value)
 
 
-def assemble(lock_path, destination):
+def assemble(lock_path, destination, areas=None):
     """Assemble locked artifacts atomically into a new directory, never run commands."""
     lock_path = Path(lock_path).resolve()
     lock_bytes = lock_path.read_bytes()
@@ -368,9 +434,10 @@ def assemble(lock_path, destination):
                     require(provided.get(dep['name']) == dep['version'], f"missing artifact dependency: {dep['name']}")
                     matching = next(p for p, m in manifests if m['package']['name'] == dep['name'])
                     require(digest(matching) == dep['sha256'], f"artifact dependency hash mismatch: {dep['name']}")
-            verify(snapshot, stage)
+            verify(snapshot, stage, areas)
         # Receipt is a sibling so it cannot collide with payload destinations.
-        receipt = {'format': 1, 'lock_sha256': hashlib.sha256(lock_bytes).hexdigest(), 'artifacts': lock['artifacts']}
+        receipt = {'format': 1, 'lock_sha256': hashlib.sha256(lock_bytes).hexdigest(), 'artifacts': lock['artifacts'],
+                   'areas': sorted(areas) if areas is not None else None}
         atomic_json(work / 'receipt.json', receipt)
         bundle = work / 'result'
         bundle.mkdir()
@@ -384,11 +451,13 @@ def assemble(lock_path, destination):
 def main(argv=None):
     """Execute the CLI and convert expected failures into concise actionable errors."""
     parser = argparse.ArgumentParser(description='Multi-project development tool')
-    parser.add_argument('--version', action='version', version='mdp 0.1.0')
+    parser.add_argument('--version', action='version', version='mdp 0.2.0')
     commands = parser.add_subparsers(dest='command', required=True)
     for name in ('lock', 'sync', 'build', 'pack'):
         cmd = commands.add_parser(name)
         cmd.add_argument('--project', default='mdp.toml')
+        if name in ('lock', 'build'):
+            cmd.add_argument('--context', help='explicit local SDK context, pinned in mdp.lock')
         if name == 'pack':
             cmd.add_argument('--output', required=True)
     cmd = commands.add_parser('verify')
@@ -398,14 +467,26 @@ def main(argv=None):
     cmd = commands.add_parser('assemble')
     cmd.add_argument('--lock', default='mdp.assembly.lock')
     cmd.add_argument('--output', required=True)
+    cmd.add_argument('--area', action='append', help='verify everything but materialize only this area')
+    cmd = commands.add_parser('pipeline', help='run a trusted project-owned pipeline')
+    cmd.add_argument('--recipe', default='mdp.recipe.json')
+    cmd = commands.add_parser('workspace', help='lock sources and build independent projects')
+    sub = cmd.add_subparsers(dest='operation', required=True)
+    for name in ('lock', 'build'):
+        item = sub.add_parser(name)
+        item.add_argument('--file', default='mdp.workspace.toml')
+        if name == 'build':
+            item.add_argument('--select', action='append')
+            item.add_argument('-j', '--jobs', type=int, default=4)
+            item.add_argument('--dry-run', action='store_true')
     args = parser.parse_args(argv)
     try:
         if args.command == 'lock':
-            lock_project(args.project)
+            lock_project(args.project, args.context)
         elif args.command == 'sync':
             sync(args.project)
         elif args.command == 'build':
-            build(args.project)
+            build(args.project, args.context)
         elif args.command == 'pack':
             pack(args.project, args.output)
         elif args.command == 'verify':
@@ -414,7 +495,19 @@ def main(argv=None):
         elif args.command == 'lock-assembly':
             composition_lock(args.config)
         elif args.command == 'assemble':
-            assemble(args.lock, args.output)
+            if args.area:
+                for area in args.area:identifier(area)
+            assemble(args.lock, args.output, set(args.area) if args.area else None)
+        elif args.command == 'pipeline':
+            from . import pipeline
+            pipeline.run(args.recipe)
+        elif args.command == 'workspace':
+            from . import workspace
+            if args.operation == 'lock':
+                workspace.lock(args.file)
+            else:
+                require(args.jobs > 0, 'jobs must be positive')
+                workspace.build(args.file, args.select, args.jobs, args.dry_run)
         return 0
     except (Error, OSError, ValueError, KeyError, TypeError, AttributeError, tarfile.TarError,
             subprocess.CalledProcessError) as error:
