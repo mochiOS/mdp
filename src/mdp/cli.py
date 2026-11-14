@@ -120,7 +120,7 @@ def sdk_context(path):
     from .workspace import source_state
     for source in value.get('sources', []):
         state = source_state(Path(source['path']))
-        keys = ('tracked_tree', 'working_tree') if 'tracked_tree' in source else ('revision', 'working_tree')
+        keys = ('content_sha256',) if 'content_sha256' in source else ('tracked_tree', 'working_tree') if 'tracked_tree' in source else ('revision', 'working_tree')
         require(all(state[k] == source[k] for k in keys), 'SDK source changed; rebuild its context')
     require(isinstance(value.get('environment'), dict) and all(isinstance(k, str) and isinstance(v, str)
             for k, v in value['environment'].items()), 'SDK environment must contain strings')

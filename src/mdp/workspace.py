@@ -39,8 +39,15 @@ def source_state(path):
     """Describe actual Git input, including local edits, without including build caches."""
     head = subprocess.check_output(['git', '-C', str(path), 'rev-parse', 'HEAD'], text=True).strip()
     tree = subprocess.check_output(['git', '-C', str(path), 'ls-tree', '-r', '-z', 'HEAD'])
-    tracked = hashlib.sha256(b'\0'.join(record for record in tree.split(b'\0')
-                                       if record and Path(os.fsdecode(record.split(b'\t', 1)[1])).name not in ('Cargo.lock', 'mdp.lock'))).hexdigest()
+    entries = {}
+    for record in tree.split(b'\0'):
+        if not record:continue
+        metadata, raw = record.split(b'\t', 1)
+        name = os.fsdecode(raw)
+        if Path(name).name in ('Cargo.lock', 'mdp.lock'):continue
+        mode, kind, oid = metadata.decode().split()
+        entries[name] = [mode, oid]
+    tracked = hashlib.sha256(encoded(entries)).hexdigest()
     changes = subprocess.check_output(['git', '-C', str(path), 'diff', 'HEAD', '--binary', '--', '.',
                                        ':!Cargo.lock', ':!mdp.lock', ':(exclude,glob)**/Cargo.lock', ':(exclude,glob)**/mdp.lock'])
     hasher = hashlib.sha256(changes)
@@ -54,6 +61,26 @@ def source_state(path):
         source = path / name
         if source.is_file() and not source.is_symlink():
             hasher.update(raw + b'\0' + bytes.fromhex(digest(source)))
+    changed = subprocess.check_output(['git', '-C', str(path), 'diff', 'HEAD', '--no-renames', '--name-only', '-z'])
+    object_format = subprocess.check_output(['git', '-C', str(path), 'rev-parse', '--show-object-format'], text=True).strip()
+    for raw in set(changed.split(b'\0')) | set(untracked.split(b'\0')):
+        if not raw:continue
+        name = os.fsdecode(raw)
+        if name.startswith(('out/', 'target/', '.mdp/')) or Path(name).name in ('Cargo.lock', 'mdp.lock'):continue
+        file = path / name
+        if file.is_symlink():
+            content = os.fsencode(os.readlink(file))
+            blob = hashlib.new(object_format, b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
+            entries[name] = ['120000', blob]
+        elif file.is_file():
+            hasher_content = hashlib.new(object_format, b'blob ' + str(file.stat().st_size).encode() + b'\0')
+            with file.open('rb') as stream:
+                while chunk := stream.read(1024 * 1024):hasher_content.update(chunk)
+            entries[name] = ['100755' if file.stat().st_mode & 0o111 else '100644', hasher_content.hexdigest()]
+        elif file.is_dir() and name in entries and entries[name][0] == '160000':
+            entries[name] = ['160000', source_state(file)['content_sha256']]
+        else:entries.pop(name, None)
+    content_identity = hashlib.sha256(encoded(entries)).hexdigest()
     locks, graphs = {}, {}
     listed = subprocess.check_output(['git', '-C', str(path), 'ls-files', '--cached', '--others', '--exclude-standard', '-z'])
     names = {os.fsdecode(raw) for raw in listed.split(b'\0') if raw and Path(os.fsdecode(raw)).name in ('Cargo.lock', 'mdp.lock')}
@@ -72,7 +99,7 @@ def source_state(path):
                     if not graph['patch']:del graph['patch']
                 graphs[name] = hashlib.sha256(encoded(graph)).hexdigest()
             else:graphs[name] = locks[name]
-    return {'revision': head, 'tracked_tree': tracked, 'working_tree': hasher.hexdigest(), 'resolution': locks, 'resolution_graph': graphs}
+    return {'revision': head, 'tracked_tree': tracked, 'content_sha256': content_identity, 'working_tree': hasher.hexdigest(), 'resolution': locks, 'resolution_graph': graphs}
 
 
 def build_key(name, cfg, states, inputs, dependencies, root):
@@ -80,7 +107,7 @@ def build_key(name, cfg, states, inputs, dependencies, root):
     sources = {}
     for key in sorted({name, *cfg.get('sources', [])}):
         state = states[key]
-        sources[key] = {'tracked_tree': state.get('tracked_tree', state['revision']), 'working_tree': state['working_tree']}
+        sources[key] = {'content_sha256': state['content_sha256']}
         if key == name and cfg.get('resolution', True):
             sources[key]['resolution'] = state.get('resolution_graph', state['resolution'])
     files = file_inputs(root, cfg)
@@ -169,7 +196,7 @@ def build_locked(path, selected=None, jobs=4, dry_run=False):
     states = {name: source_state(p['source']) for name, p in projects.items()}
     for name, state in states.items():
         expected = locked['projects'][name]
-        require(all(state[k] == expected[k] for k in ('tracked_tree', 'working_tree')),
+        require(all(state[k] == expected[k] for k in ('content_sha256',)),
                 f'{name}: source changed; run mdp workspace lock after reviewing your changes')
     names = order(projects, selected)
     if dry_run:
@@ -197,7 +224,9 @@ def build_locked(path, selected=None, jobs=4, dry_run=False):
             if not consumer_path.is_file() or json.loads(consumer_path.read_text()) != consumer_lock:
                 atomic_json(consumer_path, consumer_lock)
                 print(f'[mdp SDK lock] {name}', flush=True)
-            states[name] = source_state(project['source'])
+            refreshed = source_state(project['source'])
+            require(refreshed['content_sha256'] == states[name]['content_sha256'], f'{name}: source changed before its build')
+            states[name] = refreshed
         dependency_receipts = {dep: receipts.get(dep) for dep in cfg.get('requires', []) if not projects[dep].get('source_only', False)}
         # All source pins are part of the SDK context; per-project dependencies
         # additionally pin generated native SDK and framework products.
@@ -223,7 +252,7 @@ def build_locked(path, selected=None, jobs=4, dry_run=False):
         subprocess.run(command, cwd=project['source'], env=env, check=True)
         require(file_inputs(root, cfg) == consumed_files, f'{name}: producer file inputs changed during build')
         after = source_state(project['source'])
-        require(all(after[k] == states[name][k] for k in ('tracked_tree', 'working_tree')),
+        require(all(after[k] == states[name][k] for k in ('content_sha256',)),
                 f'{name}: source changed during its build; output is not accepted')
         states[name] = after
         state = {'input_sha256': input_key(), 'source': after, 'outputs': cfg.get('outputs', [])}

@@ -149,6 +149,22 @@ mode=420
             self.assertEqual(after['working_tree'],committed['working_tree'])
 
 
+    def test_committing_reviewed_working_content_keeps_source_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            subprocess.run(['git','init','-q',str(root)],check=True)
+            file=root/'source';file.write_text('original')
+            commit=['git','-C',str(root),'-c','commit.gpgsign=false','-c','user.name=Test','-c','user.email=test@example.invalid','commit','-qm','source']
+            subprocess.run(['git','-C',str(root),'add','.'],check=True);subprocess.run(commit,check=True)
+            file.write_text('reviewed change');(root/'module').write_text('new source')
+            before=workspace.source_state(root)
+            subprocess.run(['git','-C',str(root),'add','.'],check=True);subprocess.run(commit,check=True)
+            after=workspace.source_state(root)
+            self.assertNotEqual(before['revision'],after['revision'])
+            self.assertEqual(before['content_sha256'],after['content_sha256'])
+            file.write_text('different source')
+            self.assertNotEqual(after['content_sha256'],workspace.source_state(root)['content_sha256'])
+
     def test_dependency_order_and_cycle(self):
         projects={'a':{'config':{'build':{'requires':['b']}}},'b':{'config':{'build':{}}}}
         self.assertEqual(workspace.order(projects),['b','a'])
