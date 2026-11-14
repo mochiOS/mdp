@@ -93,6 +93,21 @@ mode=420
             self.assertTrue((root/'assembled/tree/system/bin/example').is_file())
             self.assertFalse((root/'assembled/tree/sdk').exists())
 
+    def test_cargo_diagnostics_are_retained_without_invalidating_resolution_graph(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            subprocess.run(['git','init','-q',str(root)],check=True)
+            (root/'source').write_text('original')
+            subprocess.run(['git','-C',str(root),'add','.'],check=True)
+            subprocess.run(['git','-C',str(root),'-c','commit.gpgsign=false','-c','user.name=Test','-c','user.email=test@example.invalid','commit','-qm','source'],check=True)
+            lock=root/'Cargo.lock';lock.write_text('version=4\n[[package]]\nname="example"\nversion="1"\n')
+            before=workspace.source_state(root)
+            lock.write_text(lock.read_text()+'[[patch.unused]]\nname="unused"\nversion="1"\n')
+            after=workspace.source_state(root)
+            self.assertNotEqual(before['resolution'],after['resolution'])
+            self.assertEqual(before['resolution_graph'],after['resolution_graph'])
+            self.assertIn('unused',lock.read_text())
+
     def test_dependency_order_and_cycle(self):
         projects={'a':{'config':{'build':{'requires':['b']}}},'b':{'config':{'build':{}}}}
         self.assertEqual(workspace.order(projects),['b','a'])

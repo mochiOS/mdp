@@ -51,11 +51,35 @@ def source_state(path):
         source = path / name
         if source.is_file() and not source.is_symlink():
             hasher.update(raw + b'\0' + bytes.fromhex(digest(source)))
-    locks = {}
+    locks, graphs = {}, {}
     for name in ('Cargo.lock', 'mdp.lock'):
         if (path / name).is_file():
             locks[name] = digest(path / name)
-    return {'revision': head, 'working_tree': hasher.hexdigest(), 'resolution': locks}
+            if name == 'Cargo.lock':
+                graph = tomllib.loads((path / name).read_text())
+                if 'patch' in graph:
+                    graph['patch'].pop('unused', None)
+                    if not graph['patch']:del graph['patch']
+                graphs[name] = hashlib.sha256(encoded(graph)).hexdigest()
+            else:graphs[name] = locks[name]
+    return {'revision': head, 'working_tree': hasher.hexdigest(), 'resolution': locks, 'resolution_graph': graphs}
+
+
+def build_key(name, cfg, states, inputs, dependencies, root):
+    """Hash consumed source/lock inputs, excluding unrelated source-workspace locks."""
+    sources = {}
+    for key in sorted({name, *cfg.get('sources', [])}):
+        state = states[key]
+        sources[key] = {k: state[k] for k in ('revision', 'working_tree')}
+        if key == name and cfg.get('resolution', True):
+            sources[key]['resolution'] = state.get('resolution_graph', state['resolution'])
+    files = {}
+    for name in cfg.get('inputs', []):
+        source = root / relative(name)
+        require(source.is_file() and source.resolve().is_relative_to(root), f'missing or escaping producer input: {name}')
+        files[name] = digest(source)
+    return hashlib.sha256(encoded({'sources': sources, 'inputs': inputs, 'files': files,
+                                  'dependencies': dependencies, 'command': cfg['command']})).hexdigest()
 
 
 def profile_state(root, data):
@@ -164,8 +188,7 @@ def build_locked(path, selected=None, jobs=4, dry_run=False):
         source_names = {name, *cfg.get('sources', [])}
         require(source_names <= set(states), f'{name}: unknown SDK source dependency')
         def input_key():
-            return hashlib.sha256(encoded({'sources': {key: states[key] for key in sorted(source_names)}, 'inputs': inputs,
-                                          'dependencies': dependency_receipts, 'command': cfg['command']})).hexdigest()
+            return build_key(name, cfg, states, inputs, dependency_receipts, root)
         key = input_key()
         receipt = receipts.get(name, {})
         artifact = project['source'] / relative(cfg['artifact']) if cfg.get('artifact') else None
@@ -204,8 +227,12 @@ def build_locked(path, selected=None, jobs=4, dry_run=False):
             deps = [dep for dep in cfg.get('requires', []) if not projects[dep].get('source_only', False)]
             if any(dep not in valid for dep in deps):
                 continue
-            key = hashlib.sha256(encoded({'sources': {key: source_state(projects[key]['source']) for key in sorted({name, *cfg.get('sources', [])})},
-                                          'inputs': inputs, 'dependencies': {dep: valid[dep] for dep in deps}, 'command': cfg['command']})).hexdigest()
+            if name not in receipts:
+                continue
+            if any(not (root / relative(value)).is_file() for value in cfg.get('inputs', [])):
+                continue
+            current = {key: source_state(projects[key]['source']) for key in {name, *cfg.get('sources', [])}}
+            key = build_key(name, cfg, current, inputs, {dep: valid[dep] for dep in deps}, root)
             receipt = receipts.get(name, {})
             if receipt.get('input_sha256') != key:
                 continue

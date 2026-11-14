@@ -15,10 +15,10 @@ mdp workspace build -j 4
 `source_only = true` registers source dependencies without inventing an executable.
 `optional = true` declares explicit post-processing/host tools rather than image
 prerequisites. `--select NAME` builds that producer and its prerequisites; the
-resulting composition lock includes previously successful artifacts as well.
+resulting composition lock includes previously successful artifacts only while their inputs still match.
 
 A project `mdp.toml` owns `[build].command` (an argv array), `requires` (producer
-IDs), `sources` (additional pinned source IDs), optional `artifact` (relative to
+IDs), `sources` (additional pinned source IDs), `inputs` (existing workspace-relative files consumed by this producer), optional `artifact` (relative to
 that repository), and `outputs` (workspace-relative generated cache prerequisites).
 The scheduler rejects cycles and missing producers, locks the workspace against
 concurrent builds, propagates real command failures, and verifies each exported
@@ -32,7 +32,7 @@ SDK tree by content, without recording its machine's absolute path. Source edits
 require an explicit `workspace lock`. Cargo's own lock resolutions are recorded
 in build receipts and are never restored, reordered back or overwritten with an
 old copy. Local development builds can update their Cargo locks; commit those
-updates. This is not a hermetic build sandbox or an automatic release attestation.
+updates. Raw lock digests remain recorded; build caching ignores Cargo unused-patch diagnostics, without editing or restoring those locks. Additional source repositories do not consume their unrelated workspace lockfiles. Non-compiling context producers can set `resolution = false`. This is not a hermetic build sandbox or an automatic release attestation.
 
 The workspace's `[environment]` contains explicit strings, with `{workspace}`
 expanded to the local checkout root. `MDP_JOBS`, `MDP_PROJECT`, `MDP_WORKSPACE`
