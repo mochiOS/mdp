@@ -141,6 +141,13 @@ mode=420
             self.assertNotEqual(before['resolution_graph'],after['resolution_graph'])
             self.assertIn('driver/Cargo.lock',after['resolution'])
             self.assertIn('version="2"',lock.read_text())
+            subprocess.run(['git','-C',str(root),'add','driver/Cargo.lock'],check=True)
+            subprocess.run(['git','-C',str(root),'-c','commit.gpgsign=false','-c','user.name=Test','-c','user.email=test@example.invalid','commit','-qm','resolution'],check=True)
+            committed=workspace.source_state(root)
+            self.assertNotEqual(after['revision'],committed['revision'])
+            self.assertEqual(after['tracked_tree'],committed['tracked_tree'])
+            self.assertEqual(after['working_tree'],committed['working_tree'])
+
 
     def test_dependency_order_and_cycle(self):
         projects={'a':{'config':{'build':{'requires':['b']}}},'b':{'config':{'build':{}}}}

@@ -34,6 +34,8 @@ in build receipts and are never restored, reordered back or overwritten with an
 old copy. Local development builds can update their Cargo locks; commit those
 updates. Raw lock digests remain recorded; build caching ignores Cargo unused-patch diagnostics, without editing or restoring those locks. Additional source repositories do not consume their unrelated workspace lockfiles. Non-compiling context producers can set `resolution = false`. This is not a hermetic build sandbox or an automatic release attestation.
 
+Source identity excludes Cargo/MDP lock entries from the tracked Git tree and checks the dependency graph separately. A commit that only records those locks retains the same source identity; code changes still invalidate it. Exact Git revisions and raw lock hashes remain in receipts.
+
 The workspace's `[environment]` contains explicit strings, with `{workspace}`
 expanded to the local checkout root. `MDP_JOBS`, `MDP_PROJECT`, `MDP_WORKSPACE`
 and `MDP_REQUIRES` describe the current invocation. Product-specific SDK code can

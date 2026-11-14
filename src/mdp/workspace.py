@@ -38,6 +38,9 @@ def read(path):
 def source_state(path):
     """Describe actual Git input, including local edits, without including build caches."""
     head = subprocess.check_output(['git', '-C', str(path), 'rev-parse', 'HEAD'], text=True).strip()
+    tree = subprocess.check_output(['git', '-C', str(path), 'ls-tree', '-r', '-z', 'HEAD'])
+    tracked = hashlib.sha256(b'\0'.join(record for record in tree.split(b'\0')
+                                       if record and Path(os.fsdecode(record.split(b'\t', 1)[1])).name not in ('Cargo.lock', 'mdp.lock'))).hexdigest()
     changes = subprocess.check_output(['git', '-C', str(path), 'diff', 'HEAD', '--binary', '--', '.',
                                        ':!Cargo.lock', ':!mdp.lock', ':(exclude,glob)**/Cargo.lock', ':(exclude,glob)**/mdp.lock'])
     hasher = hashlib.sha256(changes)
@@ -69,7 +72,7 @@ def source_state(path):
                     if not graph['patch']:del graph['patch']
                 graphs[name] = hashlib.sha256(encoded(graph)).hexdigest()
             else:graphs[name] = locks[name]
-    return {'revision': head, 'working_tree': hasher.hexdigest(), 'resolution': locks, 'resolution_graph': graphs}
+    return {'revision': head, 'tracked_tree': tracked, 'working_tree': hasher.hexdigest(), 'resolution': locks, 'resolution_graph': graphs}
 
 
 def build_key(name, cfg, states, inputs, dependencies, root):
@@ -77,7 +80,7 @@ def build_key(name, cfg, states, inputs, dependencies, root):
     sources = {}
     for key in sorted({name, *cfg.get('sources', [])}):
         state = states[key]
-        sources[key] = {k: state[k] for k in ('revision', 'working_tree')}
+        sources[key] = {'tracked_tree': state.get('tracked_tree', state['revision']), 'working_tree': state['working_tree']}
         if key == name and cfg.get('resolution', True):
             sources[key]['resolution'] = state.get('resolution_graph', state['resolution'])
     files = file_inputs(root, cfg)
@@ -166,7 +169,7 @@ def build_locked(path, selected=None, jobs=4, dry_run=False):
     states = {name: source_state(p['source']) for name, p in projects.items()}
     for name, state in states.items():
         expected = locked['projects'][name]
-        require(all(state[k] == expected[k] for k in ('revision', 'working_tree')),
+        require(all(state[k] == expected[k] for k in ('tracked_tree', 'working_tree')),
                 f'{name}: source changed; run mdp workspace lock after reviewing your changes')
     names = order(projects, selected)
     if dry_run:
@@ -220,7 +223,7 @@ def build_locked(path, selected=None, jobs=4, dry_run=False):
         subprocess.run(command, cwd=project['source'], env=env, check=True)
         require(file_inputs(root, cfg) == consumed_files, f'{name}: producer file inputs changed during build')
         after = source_state(project['source'])
-        require(all(after[k] == states[name][k] for k in ('revision', 'working_tree')),
+        require(all(after[k] == states[name][k] for k in ('tracked_tree', 'working_tree')),
                 f'{name}: source changed during its build; output is not accepted')
         states[name] = after
         state = {'input_sha256': input_key(), 'source': after, 'outputs': cfg.get('outputs', [])}
