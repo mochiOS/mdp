@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mdp"
+version = "0.1.0"
+description = "Multi-project development tool"
+requires-python = ">=3.11"
+
+[project.scripts]
+mdp = "mdp.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
