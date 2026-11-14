@@ -171,6 +171,18 @@ def order(projects, selected=None):
     return result
 
 
+def source_closure(projects, name):
+    """Collect transitive source inputs; shared protocols may form source cycles."""
+    pending, result = [name], set()
+    while pending:
+        current = pending.pop()
+        require(current in projects, f'unknown SDK source dependency: {current}')
+        if current in result:continue
+        result.add(current)
+        pending.extend(projects[current]['config'].get('build', {}).get('sources', []))
+    return result
+
+
 def build(path, selected=None, jobs=4, dry_run=False):
     """Serialize workspace builds while keeping producer logic in its own repository."""
     root = Path(path).resolve().parent
@@ -187,6 +199,10 @@ def build(path, selected=None, jobs=4, dry_run=False):
 def build_locked(path, selected=None, jobs=4, dry_run=False):
     """Run project-owned entry points and record exact output identities for composition."""
     root, data, projects = read(path)
+    closures = {name: source_closure(projects, name) - {name} for name in projects}
+    for name, project in projects.items():
+        if 'build' in project['config']:
+            project['config']['build'] = dict(project['config']['build'], sources=sorted(closures[name]))
     lock_path = root / 'mdp.workspace.lock'
     require(lock_path.is_file(), 'workspace lock missing; run mdp workspace lock')
     locked = json.loads(lock_path.read_text())

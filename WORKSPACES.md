@@ -18,9 +18,9 @@ prerequisites. `--select NAME` builds that producer and its prerequisites; the
 resulting composition lock includes previously successful artifacts only while their inputs still match.
 
 A project `mdp.toml` owns `[build].command` (an argv array), `requires` (producer
-IDs), `sources` (additional pinned source IDs), `inputs` (existing workspace-relative files consumed by this producer), optional `artifact` (relative to
+IDs), `sources` (additional pinned source IDs, including their transitive source inputs), `inputs` (existing workspace-relative files consumed by this producer), optional `artifact` (relative to
 that repository), and `outputs` (workspace-relative generated cache prerequisites).
-The scheduler rejects cycles and missing producers, locks the workspace against
+Source-only references can be cyclic (for example shared protocol crates); they are collected once and never invoke another build. Artifact build dependencies remain acyclic. The scheduler rejects build cycles and missing producers, locks the workspace against
 concurrent builds, propagates real command failures, and verifies each exported
 archive. Cache receipts require matching source, SDK/configuration, dependency
 and archive identities. An unchanged artifact can be reused; missing or corrupt

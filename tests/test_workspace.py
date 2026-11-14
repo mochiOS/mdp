@@ -165,6 +165,14 @@ mode=420
             file.write_text('different source')
             self.assertNotEqual(after['content_sha256'],workspace.source_state(root)['content_sha256'])
 
+    def test_transitive_sources_include_shared_protocol_cycles(self):
+        projects={'runtime':{'config':{'build':{'sources':['service']}}},
+                  'service':{'config':{'build':{'sources':['runtime','viewkit']}}},
+                  'viewkit':{'config':{'build':{}}}}
+        self.assertEqual(workspace.source_closure(projects,'runtime'),{'runtime','service','viewkit'})
+        projects['viewkit']['config']['build']['sources']=['missing']
+        with self.assertRaisesRegex(Error,'unknown SDK source'):workspace.source_closure(projects,'runtime')
+
     def test_dependency_order_and_cycle(self):
         projects={'a':{'config':{'build':{'requires':['b']}}},'b':{'config':{'build':{}}}}
         self.assertEqual(workspace.order(projects),['b','a'])
