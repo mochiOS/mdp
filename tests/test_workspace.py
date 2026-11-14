@@ -19,6 +19,7 @@ class WorkspaceTests(unittest.TestCase):
     def test_real_workspace_pipeline_cache_and_artifact_dependencies(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)
+            (root/'seed').write_text('first')
             for name,requires in [('library',[]),('app',['library'])]:
                 project=root/name;project.mkdir()
                 subprocess.run(['git','init','-q',str(project)],check=True)
@@ -26,7 +27,7 @@ class WorkspaceTests(unittest.TestCase):
                         'package':dict(name=name,version='1',target='test',abi='test'),
                         'artifact':'out/'+name+'.tar.mdp','exports':[dict(source='out/result',area='files',destination=name)]}
                 (project/'mdp.recipe.json').write_text(json.dumps(recipe))
-                (project/'mdp.toml').write_text('format=1\n[build]\ncommand=["mdp","pipeline"]\nrequires='+json.dumps(requires)+'\nartifact="out/'+name+'.tar.mdp"\n')
+                (project/'mdp.toml').write_text('format=1\n[build]\ncommand=["mdp","pipeline"]\nrequires='+json.dumps(requires)+'\ninputs='+json.dumps(['seed'] if name=='app' else [])+'\nartifact="out/'+name+'.tar.mdp"\n')
                 subprocess.run(['git','-C',str(project),'add','.'],check=True)
                 subprocess.run(['git','-C',str(project),'-c','commit.gpgsign=false','-c','user.name=Test','-c','user.email=test@example.invalid','commit','-qm','source'],check=True)
             cfg=root/'mdp.workspace.toml'
@@ -39,6 +40,10 @@ class WorkspaceTests(unittest.TestCase):
             assemble(root/'mdp.assembly.lock',root/'assembled')
             self.assertEqual((root/'assembled/tree/files/app').read_bytes(),b'actual')
             self.assertEqual(len(verify(root/'app/out/app.tar.mdp')['dependencies']),1)
+            (root/'seed').write_text('second')
+            workspace.build(cfg)
+            self.assertEqual((root/'app/out/counter').read_bytes(),b'xx')
+            self.assertEqual((root/'library/out/counter').read_bytes(),b'x')
 
     def test_source_change_during_build_never_publishes_composition(self):
         with tempfile.TemporaryDirectory() as tmp:

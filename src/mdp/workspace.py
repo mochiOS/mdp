@@ -73,13 +73,19 @@ def build_key(name, cfg, states, inputs, dependencies, root):
         sources[key] = {k: state[k] for k in ('revision', 'working_tree')}
         if key == name and cfg.get('resolution', True):
             sources[key]['resolution'] = state.get('resolution_graph', state['resolution'])
+    files = file_inputs(root, cfg)
+    return hashlib.sha256(encoded({'sources': sources, 'inputs': inputs, 'files': files,
+                                  'dependencies': dependencies, 'command': cfg['command']})).hexdigest()
+
+
+def file_inputs(root, cfg):
+    """Measure existing producer inputs, including images made by a separate composer."""
     files = {}
     for name in cfg.get('inputs', []):
         source = root / relative(name)
         require(source.is_file() and source.resolve().is_relative_to(root), f'missing or escaping producer input: {name}')
         files[name] = digest(source)
-    return hashlib.sha256(encoded({'sources': sources, 'inputs': inputs, 'files': files,
-                                  'dependencies': dependencies, 'command': cfg['command']})).hexdigest()
+    return files
 
 
 def profile_state(root, data):
@@ -190,6 +196,7 @@ def build_locked(path, selected=None, jobs=4, dry_run=False):
         def input_key():
             return build_key(name, cfg, states, inputs, dependency_receipts, root)
         key = input_key()
+        consumed_files = file_inputs(root, cfg)
         receipt = receipts.get(name, {})
         artifact = project['source'] / relative(cfg['artifact']) if cfg.get('artifact') else None
         outputs = [root / relative(value) for value in cfg.get('outputs', [])]
@@ -204,6 +211,7 @@ def build_locked(path, selected=None, jobs=4, dry_run=False):
         env['MDP_REQUIRES'] = json.dumps(order(projects, cfg.get('requires', [])))
         env['PATH'] = str(Path(__file__).resolve().parents[2]) + os.pathsep + env.get('PATH', '')
         subprocess.run(command, cwd=project['source'], env=env, check=True)
+        require(file_inputs(root, cfg) == consumed_files, f'{name}: producer file inputs changed during build')
         after = source_state(project['source'])
         require(all(after[k] == states[name][k] for k in ('revision', 'working_tree')),
                 f'{name}: source changed during its build; output is not accepted')
