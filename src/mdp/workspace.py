@@ -281,7 +281,7 @@ def build_locked(path, selected=None, jobs=4, dry_run=False):
     require(profile_state(root, data) == inputs, "workspace configuration/SDK inputs changed during build")
     for name, project in projects.items():
         after = source_state(project["source"])
-        require(all(after[k] == states[name][k] for k in ("revision", "working_tree")),
+        require(after['content_sha256'] == states[name]['content_sha256'],
                 f"{name}: source changed during workspace build; composition lock is not updated")
     if receipts:
         valid = {}
