@@ -59,6 +59,33 @@ class WorkspaceTests(unittest.TestCase):
             with self.assertRaisesRegex(Error,'source changed during'):workspace.build(cfg)
             self.assertFalse((root/'mdp.assembly.lock').exists())
 
+    def test_selected_build_allows_unrelated_edits_but_excludes_stale_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            for name in ('library','app'):
+                project=root/name;project.mkdir()
+                subprocess.run(['git','init','-q',str(project)],check=True)
+                recipe={'format':1,'steps':['mkdir -p out; printf actual > out/result'],
+                        'package':dict(name=name,version='1',target='test',abi='test'),
+                        'artifact':'out/'+name+'.tar.mdp','exports':[dict(source='out/result',area='files',destination=name)]}
+                (project/'mdp.recipe.json').write_text(json.dumps(recipe))
+                (project/'mdp.toml').write_text('format=1\n[build]\ncommand=["mdp","pipeline"]\nartifact="out/'+name+'.tar.mdp"\n')
+                (project/'source').write_text('original')
+                subprocess.run(['git','-C',str(project),'add','.'],check=True)
+                subprocess.run(['git','-C',str(project),'-c','commit.gpgsign=false','-c','user.name=Test','-c','user.email=test@example.invalid','commit','-qm','source'],check=True)
+            cfg=root/'mdp.workspace.toml'
+            cfg.write_text('format=1\ntarget="test"\nabi="test"\n[[projects]]\nname="library"\npath="library"\n[[projects]]\nname="app"\npath="app"\n')
+            workspace.lock(cfg);workspace.build(cfg)
+            recipe_path=root/'library/mdp.recipe.json';recipe=json.loads(recipe_path.read_text())
+            recipe['steps'].append("printf changed > ../app/source")
+            recipe_path.write_text(json.dumps(recipe));workspace.lock(cfg)
+            workspace.build(cfg,selected=['library'])
+            artifacts=json.loads((root/'mdp.assembly.lock').read_text())['artifacts']
+            self.assertEqual([a['package']['name'] for a in artifacts],['library'])
+            (root/'app/source').write_text('another unrelated edit')
+            with contextlib.redirect_stdout(io.StringIO()) as output:workspace.build(cfg,selected=['library'])
+            self.assertIn('[mdp cached] library',output.getvalue())
+
     def test_commit_of_an_earlier_producers_unchanged_content_is_accepted(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)

@@ -209,12 +209,13 @@ def build_locked(path, selected=None, jobs=4, dry_run=False):
     inputs = profile_state(root, data)
     require(locked.get('format') == 1 and locked.get('inputs') == inputs, 'workspace configuration/SDK inputs changed; run mdp workspace lock')
     require(set(locked.get('projects', {})) == set(projects), 'workspace registry changed; run mdp workspace lock')
-    states = {name: source_state(p['source']) for name, p in projects.items()}
+    names = order(projects, selected)
+    consumed = set(names).union(*(closures[name] for name in names))
+    states = {name: source_state(projects[name]['source']) for name in consumed}
     for name, state in states.items():
         expected = locked['projects'][name]
         require(all(state[k] == expected[k] for k in ('content_sha256',)),
                 f'{name}: source changed; run mdp workspace lock after reviewing your changes')
-    names = order(projects, selected)
     if dry_run:
         for name in names:
             print(name + ': ' + json.dumps(projects[name]['config']['build']['command']))
@@ -279,8 +280,8 @@ def build_locked(path, selected=None, jobs=4, dry_run=False):
         receipts[name] = state
         atomic_json(receipts_path, receipts)
     require(profile_state(root, data) == inputs, "workspace configuration/SDK inputs changed during build")
-    for name, project in projects.items():
-        after = source_state(project["source"])
+    for name in consumed:
+        after = source_state(projects[name]["source"])
         require(after['content_sha256'] == states[name]['content_sha256'],
                 f"{name}: source changed during workspace build; composition lock is not updated")
     if receipts:

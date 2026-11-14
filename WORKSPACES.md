@@ -16,6 +16,9 @@ mdp workspace build -j 4
 `optional = true` declares explicit post-processing/host tools rather than image
 prerequisites. `--select NAME` builds that producer and its prerequisites; the
 resulting composition lock includes previously successful artifacts only while their inputs still match.
+Source checks cover the selected producers and their consumed source dependencies.
+An unrelated repository can be edited concurrently; its stale artifacts are
+excluded from the resulting composition instead of blocking the selected build.
 
 A project `mdp.toml` owns `[build].command` (an argv array), `requires` (producer
 IDs), `sources` (additional pinned source IDs, including their transitive source inputs), `inputs` (existing workspace-relative files consumed by this producer), optional `artifact` (relative to
