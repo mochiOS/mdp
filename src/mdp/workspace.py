@@ -37,8 +37,20 @@ def read(path):
 
 def source_state(path):
     """Describe actual Git input, including local edits, without including build caches."""
-    head = subprocess.check_output(['git', '-C', str(path), 'rev-parse', 'HEAD'], text=True).strip()
-    tree = subprocess.check_output(['git', '-C', str(path), 'ls-tree', '-r', '-z', 'HEAD'])
+    for _ in range(4):
+        head = subprocess.check_output(['git', '-C', str(path), 'rev-parse', 'HEAD'], text=True).strip()
+        index = subprocess.check_output(['git', '-C', str(path), 'ls-files', '--stage', '-z'])
+        try:state = read_source_state(path, head)
+        except FileNotFoundError:continue
+        after = subprocess.check_output(['git', '-C', str(path), 'rev-parse', 'HEAD'], text=True).strip()
+        after_index = subprocess.check_output(['git', '-C', str(path), 'ls-files', '--stage', '-z'])
+        if head == after and index == after_index:return state
+    raise Error(f'{path}: Git state kept changing while reading source inputs; retry the build')
+
+
+def read_source_state(path, head):
+    """Read against one captured revision; the caller verifies index/revision stability."""
+    tree = subprocess.check_output(['git', '-C', str(path), 'ls-tree', '-r', '-z', head])
     entries = {}
     for record in tree.split(b'\0'):
         if not record:continue
@@ -48,7 +60,7 @@ def source_state(path):
         mode, kind, oid = metadata.decode().split()
         entries[name] = [mode, oid]
     tracked = hashlib.sha256(encoded(entries)).hexdigest()
-    changes = subprocess.check_output(['git', '-C', str(path), 'diff', 'HEAD', '--binary', '--', '.',
+    changes = subprocess.check_output(['git', '-C', str(path), 'diff', head, '--binary', '--', '.',
                                        ':!Cargo.lock', ':!mdp.lock', ':(exclude,glob)**/Cargo.lock', ':(exclude,glob)**/mdp.lock'])
     hasher = hashlib.sha256(changes)
     untracked = subprocess.check_output(['git', '-C', str(path), 'ls-files', '--others', '--exclude-standard', '-z'])
@@ -61,7 +73,7 @@ def source_state(path):
         source = path / name
         if source.is_file() and not source.is_symlink():
             hasher.update(raw + b'\0' + bytes.fromhex(digest(source)))
-    changed = subprocess.check_output(['git', '-C', str(path), 'diff', 'HEAD', '--no-renames', '--name-only', '-z'])
+    changed = subprocess.check_output(['git', '-C', str(path), 'diff', head, '--no-renames', '--name-only', '-z'])
     object_format = subprocess.check_output(['git', '-C', str(path), 'rev-parse', '--show-object-format'], text=True).strip()
     for raw in set(changed.split(b'\0')) | set(untracked.split(b'\0')):
         if not raw:continue
@@ -88,9 +100,10 @@ def source_state(path):
     for name in sorted(names):
         if name.startswith(('out/', 'target/', '.mdp/')):continue
         if (path / name).is_file():
-            locks[name] = digest(path / name)
+            raw_lock = (path / name).read_bytes()
+            locks[name] = hashlib.sha256(raw_lock).hexdigest()
             if Path(name).name == 'Cargo.lock':
-                try:graph = tomllib.loads((path / name).read_text())
+                try:graph = tomllib.loads(raw_lock.decode())
                 except tomllib.TOMLDecodeError:
                     graphs[name] = locks[name]
                     continue

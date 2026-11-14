@@ -253,6 +253,35 @@ mode=420
             file.write_text('different source')
             self.assertNotEqual(after['content_sha256'],workspace.source_state(root)['content_sha256'])
 
+    def test_source_snapshot_retries_git_commit_and_index_changes(self):
+        for operation in ('commit','unstage'):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp)
+                subprocess.run(['git','init','-q',str(root)],check=True)
+                (root/'source').write_text('original')
+                commit=['git','-C',str(root),'-c','commit.gpgsign=false','-c','user.name=Test','-c','user.email=test@example.invalid','commit','-qm','source']
+                subprocess.run(['git','-C',str(root),'add','.'],check=True);subprocess.run(commit,check=True)
+                (root/'module').write_text('reviewed new source')
+                if operation=='unstage':subprocess.run(['git','-C',str(root),'add','module'],check=True)
+                expected=workspace.source_state(root)['content_sha256']
+                real=subprocess.check_output;changed=False
+                def read(arguments,*args,**kwargs):
+                    nonlocal changed
+                    result=real(arguments,*args,**kwargs)
+                    trigger=('ls-tree' in arguments if operation=='commit' else
+                             'ls-files' in arguments and '--others' in arguments and '--cached' not in arguments)
+                    if trigger and not changed:
+                        changed=True
+                        if operation=='commit':
+                            subprocess.run(['git','-C',str(root),'add','module'],check=True);subprocess.run(commit,check=True)
+                        else:subprocess.run(['git','-C',str(root),'rm','--cached','-q','module'],check=True)
+                    return result
+                with patch.object(workspace.subprocess,'check_output',side_effect=read):actual=workspace.source_state(root)
+                self.assertTrue(changed)
+                self.assertEqual(actual['content_sha256'],expected)
+                self.assertEqual(actual['revision'],real(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip())
+                if operation=='commit':self.assertEqual(actual['tracked_tree'],actual['content_sha256'])
+
     def test_transitive_sources_include_shared_protocol_cycles(self):
         projects={'runtime':{'config':{'build':{'sources':['service']}}},
                   'service':{'config':{'build':{'sources':['runtime','viewkit']}}},
