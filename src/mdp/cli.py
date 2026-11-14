@@ -332,7 +332,8 @@ def composition_lock(config_path):
 def assemble(lock_path, destination):
     """Assemble locked artifacts atomically into a new directory, never run commands."""
     lock_path = Path(lock_path).resolve()
-    lock = read_json(lock_path)
+    lock_bytes = lock_path.read_bytes()
+    lock = json.loads(lock_bytes)
     require(lock.get('format') == 1 and lock.get('artifacts'), 'invalid assembly lock')
     destination = Path(destination).absolute()
     require(not destination.exists() and not destination.is_symlink(), 'output already exists; choose a new directory')
@@ -369,7 +370,7 @@ def assemble(lock_path, destination):
                     require(digest(matching) == dep['sha256'], f"artifact dependency hash mismatch: {dep['name']}")
             verify(snapshot, stage)
         # Receipt is a sibling so it cannot collide with payload destinations.
-        receipt = {'format': 1, 'lock_sha256': digest(lock_path), 'artifacts': lock['artifacts']}
+        receipt = {'format': 1, 'lock_sha256': hashlib.sha256(lock_bytes).hexdigest(), 'artifacts': lock['artifacts']}
         atomic_json(work / 'receipt.json', receipt)
         bundle = work / 'result'
         bundle.mkdir()
